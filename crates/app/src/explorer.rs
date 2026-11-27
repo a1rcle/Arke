@@ -2814,7 +2814,10 @@ impl Explorer {
                 && !crate::global_search::is_network_path(&root)
             {
                 self.watch_global(cx);
-                global.update(cx, crate::global_search::GlobalSearch::ensure_everything_if_idle);
+                global.update(
+                    cx,
+                    crate::global_search::GlobalSearch::ensure_everything_if_idle,
+                );
                 if global.read(cx).can_search_subfolders(&root, &query) {
                     self.search.stop();
                     self.search_root = None;

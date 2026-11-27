@@ -26,7 +26,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -35,11 +37,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, EnumChildWindows, GW_OWNER,
-    GetClassNameW, GetDlgCtrlID, GetForegroundWindow, GetMessageW, GetParent,
-    GetWindow, GetWindowThreadProcessId, HC_ACTION, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT,
-    MSG, PostMessageW, PostThreadMessageW, SMTO_ABORTIFHUNG, SMTO_NORMAL, SendMessageTimeoutW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT,
-    WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SETTEXT, WM_SYSKEYDOWN,
+    GetClassNameW, GetDlgCtrlID, GetForegroundWindow, GetMessageW, GetParent, GetWindow,
+    GetWindowThreadProcessId, HC_ACTION, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, MSG,
+    PostMessageW, PostThreadMessageW, SMTO_ABORTIFHUNG, SMTO_NORMAL, SendMessageTimeoutW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WINEVENT_OUTOFCONTEXT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SETTEXT,
+    WM_SYSKEYDOWN,
 };
 use windows::core::BOOL;
 
@@ -198,12 +201,7 @@ pub(crate) fn decide_hotkey(
     if *g_taken {
         return HotkeyVerdict::Swallow;
     }
-    if held(VK_CONTROL)
-        && !held(VK_SHIFT)
-        && !held(VK_MENU)
-        && !held(VK_LWIN)
-        && !held(VK_RWIN)
-    {
+    if held(VK_CONTROL) && !held(VK_SHIFT) && !held(VK_MENU) && !held(VK_LWIN) && !held(VK_RWIN) {
         *g_taken = true;
         HotkeyVerdict::Trigger
     } else {
@@ -382,15 +380,17 @@ fn run_hook_loop(thread_id: &AtomicU32, stopped: &AtomicBool) {
     // SAFETY: module handle of our own exe; `on_key` lives for the whole run.
     let module = unsafe { GetModuleHandleW(None) }.ok();
     // SAFETY: low-level keyboard hook installed and removed on this thread; callback stays short.
-    let kbd_hook = match unsafe {
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(on_key), module.map(Into::into), 0)
-    } {
-        Ok(h) => Some(h),
-        Err(err) => {
-            log::warn!("dialog jump: cannot install Ctrl+G keyboard hook (auto-jump still on): {err}");
-            None
-        }
-    };
+    let kbd_hook =
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(on_key), module.map(Into::into), 0) }
+        {
+            Ok(h) => Some(h),
+            Err(err) => {
+                log::warn!(
+                    "dialog jump: cannot install Ctrl+G keyboard hook (auto-jump still on): {err}"
+                );
+                None
+            }
+        };
 
     log::info!("dialog jump: on");
     if !stopped.load(Ordering::SeqCst) {
@@ -1031,10 +1031,16 @@ mod tests {
         let t0 = Instant::now();
 
         // 1. Direct #32770 without prior Arke activation: silent.
-        assert_eq!(t.on_foreground_change(0xD1, WindowClassKind::Dialog, t0), None);
+        assert_eq!(
+            t.on_foreground_change(0xD1, WindowClassKind::Dialog, t0),
+            None
+        );
 
         // 2. Arke -> #32770: triggers.
-        assert_eq!(t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t0), None);
+        assert_eq!(
+            t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t0),
+            None
+        );
         assert_eq!(
             t.on_foreground_change(0xD1, WindowClassKind::Dialog, t0),
             Some((0xA1, SourceKind::Arke))
@@ -1042,23 +1048,38 @@ mod tests {
 
         // 3. Repeated foreground event on same #32770 does not re-trigger.
         assert_eq!(
-            t.on_foreground_change(0xD1, WindowClassKind::Dialog, t0 + Duration::from_millis(50)),
+            t.on_foreground_change(
+                0xD1,
+                WindowClassKind::Dialog,
+                t0 + Duration::from_millis(50)
+            ),
             None
         );
 
         // 4. Rapid Arke -> same #32770 within 300ms is debounced.
         assert_eq!(
-            t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t0 + Duration::from_millis(100)),
+            t.on_foreground_change(
+                0xA1,
+                WindowClassKind::ArkeMain,
+                t0 + Duration::from_millis(100)
+            ),
             None
         );
         assert_eq!(
-            t.on_foreground_change(0xD1, WindowClassKind::Dialog, t0 + Duration::from_millis(150)),
+            t.on_foreground_change(
+                0xD1,
+                WindowClassKind::Dialog,
+                t0 + Duration::from_millis(150)
+            ),
             None
         );
 
         // 5. After >= 300ms, Arke -> same #32770 triggers again.
         let t_later = t0 + Duration::from_millis(350);
-        assert_eq!(t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_later), None);
+        assert_eq!(
+            t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_later),
+            None
+        );
         assert_eq!(
             t.on_foreground_change(0xD1, WindowClassKind::Dialog, t_later),
             Some((0xA1, SourceKind::Arke))
@@ -1066,15 +1087,30 @@ mod tests {
 
         // 6. Arke -> Other -> #32770: chain broken, stays silent, but last_source_hwnd stays for Ctrl+G.
         let t_other = t0 + Duration::from_secs(1);
-        assert_eq!(t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_other), None);
-        assert_eq!(t.on_foreground_change(0xB1, WindowClassKind::Other, t_other), None);
-        assert_eq!(t.on_foreground_change(0xD1, WindowClassKind::Dialog, t_other), None);
+        assert_eq!(
+            t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_other),
+            None
+        );
+        assert_eq!(
+            t.on_foreground_change(0xB1, WindowClassKind::Other, t_other),
+            None
+        );
+        assert_eq!(
+            t.on_foreground_change(0xD1, WindowClassKind::Dialog, t_other),
+            None
+        );
         assert_eq!(t.last_source_hwnd, Some(0xA1));
 
         // 7. Arke -> ArkePopup -> #32770: popup does not break transition chain.
         let t_popup = t0 + Duration::from_secs(2);
-        assert_eq!(t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_popup), None);
-        assert_eq!(t.on_foreground_change(0xA2, WindowClassKind::ArkePopup, t_popup), None);
+        assert_eq!(
+            t.on_foreground_change(0xA1, WindowClassKind::ArkeMain, t_popup),
+            None
+        );
+        assert_eq!(
+            t.on_foreground_change(0xA2, WindowClassKind::ArkePopup, t_popup),
+            None
+        );
         assert_eq!(
             t.on_foreground_change(0xD1, WindowClassKind::Dialog, t_popup),
             Some((0xA1, SourceKind::Arke))
@@ -1096,22 +1132,49 @@ mod tests {
         let none = |_: u16| false;
 
         // Unrelated key passes.
-        assert_eq!(decide_hotkey(0x41, true, ctrl_only, &mut taken), HotkeyVerdict::Pass);
+        assert_eq!(
+            decide_hotkey(0x41, true, ctrl_only, &mut taken),
+            HotkeyVerdict::Pass
+        );
         // Plain G without Ctrl passes.
-        assert_eq!(decide_hotkey(VK_G, true, none, &mut taken), HotkeyVerdict::Pass);
+        assert_eq!(
+            decide_hotkey(VK_G, true, none, &mut taken),
+            HotkeyVerdict::Pass
+        );
         // Modified chords pass.
-        assert_eq!(decide_hotkey(VK_G, true, ctrl_shift, &mut taken), HotkeyVerdict::Pass);
-        assert_eq!(decide_hotkey(VK_G, true, ctrl_alt, &mut taken), HotkeyVerdict::Pass);
-        assert_eq!(decide_hotkey(VK_G, true, ctrl_win, &mut taken), HotkeyVerdict::Pass);
+        assert_eq!(
+            decide_hotkey(VK_G, true, ctrl_shift, &mut taken),
+            HotkeyVerdict::Pass
+        );
+        assert_eq!(
+            decide_hotkey(VK_G, true, ctrl_alt, &mut taken),
+            HotkeyVerdict::Pass
+        );
+        assert_eq!(
+            decide_hotkey(VK_G, true, ctrl_win, &mut taken),
+            HotkeyVerdict::Pass
+        );
 
         // Plain Ctrl+G triggers, repeats swallow, release swallows and resets.
-        assert_eq!(decide_hotkey(VK_G, true, ctrl_only, &mut taken), HotkeyVerdict::Trigger);
+        assert_eq!(
+            decide_hotkey(VK_G, true, ctrl_only, &mut taken),
+            HotkeyVerdict::Trigger
+        );
         assert!(taken);
-        assert_eq!(decide_hotkey(VK_G, true, ctrl_only, &mut taken), HotkeyVerdict::Swallow);
-        assert_eq!(decide_hotkey(VK_G, false, ctrl_only, &mut taken), HotkeyVerdict::Swallow);
+        assert_eq!(
+            decide_hotkey(VK_G, true, ctrl_only, &mut taken),
+            HotkeyVerdict::Swallow
+        );
+        assert_eq!(
+            decide_hotkey(VK_G, false, ctrl_only, &mut taken),
+            HotkeyVerdict::Swallow
+        );
         assert!(!taken);
         // Stray key-up passes.
-        assert_eq!(decide_hotkey(VK_G, false, none, &mut taken), HotkeyVerdict::Pass);
+        assert_eq!(
+            decide_hotkey(VK_G, false, none, &mut taken),
+            HotkeyVerdict::Pass
+        );
     }
 
     #[test]
@@ -1124,10 +1187,7 @@ mod tests {
             parse_toolbar_address(r"地址: D:\Work\项目").as_deref(),
             Some(r"D:\Work\项目")
         );
-        assert_eq!(
-            parse_toolbar_address(r"位址: E:\").as_deref(),
-            Some(r"E:\")
-        );
+        assert_eq!(parse_toolbar_address(r"位址: E:\").as_deref(), Some(r"E:\"));
         assert_eq!(
             parse_toolbar_address(r"アドレス: C:\Users\Dev").as_deref(),
             Some(r"C:\Users\Dev")
@@ -1136,7 +1196,10 @@ mod tests {
             parse_toolbar_address(r"Adresse: \\fileserver\share\docs").as_deref(),
             Some(r"\\fileserver\share\docs")
         );
-        assert_eq!(parse_toolbar_address(r"C:\Direct").as_deref(), Some(r"C:\Direct"));
+        assert_eq!(
+            parse_toolbar_address(r"C:\Direct").as_deref(),
+            Some(r"C:\Direct")
+        );
         assert_eq!(parse_toolbar_address("Address: Desktop"), None);
         assert_eq!(parse_toolbar_address("地址: 此电脑"), None);
         assert_eq!(parse_toolbar_address(""), None);
@@ -1147,7 +1210,10 @@ mod tests {
         assert_eq!(normalize_dir_path(Path::new(r"D:\Work")), r"D:\Work\");
         assert_eq!(normalize_dir_path(Path::new(r"D:\Work\")), r"D:\Work\");
         assert_eq!(normalize_dir_path(Path::new(r"C:\")), r"C:\");
-        assert_eq!(normalize_dir_path(Path::new(r"\\srv\share")), r"\\srv\share\");
+        assert_eq!(
+            normalize_dir_path(Path::new(r"\\srv\share")),
+            r"\\srv\share\"
+        );
 
         assert!(paths_equal(r"C:\Windows\System32", r"c:\windows\system32\"));
         assert!(paths_equal(r"C:\", r"c:"));
@@ -1164,10 +1230,19 @@ mod tests {
 
     #[test]
     fn window_class_classification() {
-        assert_eq!(classify_window_class("ArkeWindow"), WindowClassKind::ArkeMain);
-        assert_eq!(classify_window_class("ArkeWindow.Popup"), WindowClassKind::ArkePopup);
+        assert_eq!(
+            classify_window_class("ArkeWindow"),
+            WindowClassKind::ArkeMain
+        );
+        assert_eq!(
+            classify_window_class("ArkeWindow.Popup"),
+            WindowClassKind::ArkePopup
+        );
         assert_eq!(classify_window_class("#32770"), WindowClassKind::Dialog);
-        assert_eq!(classify_window_class("Chrome_WidgetWin_1"), WindowClassKind::Other);
+        assert_eq!(
+            classify_window_class("Chrome_WidgetWin_1"),
+            WindowClassKind::Other
+        );
     }
 
     static LIVE_FOUND_DLG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -1304,12 +1379,18 @@ mod tests {
             );
         }
 
-        let (ok1, p1) =
-            live_click_and_inject(dlg_hwnd, ctrls.dui.expect("DirectUIHWND"), r"C:\Windows\System32");
+        let (ok1, p1) = live_click_and_inject(
+            dlg_hwnd,
+            ctrls.dui.expect("DirectUIHWND"),
+            r"C:\Windows\System32",
+        );
         let (ok2, p2) =
             live_click_and_inject(dlg_hwnd, ctrls.tree.expect("SysTreeView32"), r"C:\Users");
-        let (ok3, p3) =
-            live_click_and_inject(dlg_hwnd, ctrls.toolbar.expect("ToolbarWindow32"), r"C:\Windows");
+        let (ok3, p3) = live_click_and_inject(
+            dlg_hwnd,
+            ctrls.toolbar.expect("ToolbarWindow32"),
+            r"C:\Windows",
+        );
 
         // Close dialog before asserting so the test thread never hangs on failure.
         // SAFETY: closes the test dialog cleanly.

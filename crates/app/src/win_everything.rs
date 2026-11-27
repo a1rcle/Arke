@@ -285,8 +285,18 @@ pub(crate) fn is_db_loaded() -> bool {
 /// Probes the system for an installed `Everything.exe` binary.
 pub(crate) fn probe_everything_executable() -> Option<PathBuf> {
     let reg_probes = [
-        (HKEY_CURRENT_USER, r"Software\voidtools\Everything", "InstallPath", true),
-        (HKEY_LOCAL_MACHINE, r"Software\voidtools\Everything", "InstallPath", true),
+        (
+            HKEY_CURRENT_USER,
+            r"Software\voidtools\Everything",
+            "InstallPath",
+            true,
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"Software\voidtools\Everything",
+            "InstallPath",
+            true,
+        ),
         (
             HKEY_LOCAL_MACHINE,
             r"Software\Microsoft\Windows\CurrentVersion\App Paths\Everything.exe",
@@ -640,8 +650,13 @@ mod tests {
         );
         if is_everything_running() && is_db_loaded() {
             let cancel = AtomicBool::new(false);
-            let out = execute_query("Cargo.toml", 5, EVERYTHING_SORT_RUN_COUNT_DESCENDING, &cancel)
-                .expect("live Everything query should succeed when daemon is running");
+            let out = execute_query(
+                "Cargo.toml",
+                5,
+                EVERYTHING_SORT_RUN_COUNT_DESCENDING,
+                &cancel,
+            )
+            .expect("live Everything query should succeed when daemon is running");
             assert!(
                 !out.items.is_empty(),
                 "live Everything query should find Cargo.toml"

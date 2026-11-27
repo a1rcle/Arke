@@ -787,15 +787,19 @@ impl GlobalSearch {
             } else {
                 win_everything::EVERYTHING_SORT_RUN_COUNT_DESCENDING
             };
-            let output =
-                match win_everything::execute_query(&translated.text, candidate_cap, sort, cancel) {
-                    Ok(out) => out,
-                    Err(err) => {
-                        log::debug!("Everything query failed: {err:?}");
-                        let _ = tx.send(Found::default());
-                        return;
-                    }
-                };
+            let output = match win_everything::execute_query(
+                &translated.text,
+                candidate_cap,
+                sort,
+                cancel,
+            ) {
+                Ok(out) => out,
+                Err(err) => {
+                    log::debug!("Everything query failed: {err:?}");
+                    let _ = tx.send(Found::default());
+                    return;
+                }
+            };
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
