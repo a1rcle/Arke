@@ -163,3 +163,11 @@ With them, tests read what a screen reader is given through `Window::debug_a11y_
 
 The `examples`, `tests` and `benches` folders and their
 `Cargo.toml` entries are left out. Offered upstream; drop this copy once a gpui-pre has it.
+
+## everything (`third_party/everything/Everything64.dll`)
+
+- License: MIT (voidtools Everything SDK, Copyright (C) 2016 David Carpenter)
+- Usage: Loaded dynamically at runtime via `LoadLibraryW` / `GetProcAddress` in
+  `crates/app/src/win_everything.rs` for whole-PC and local subfolder file search.
+- Build integration: `crates/app/build.rs` (`copy_everything_dll`) copies `Everything64.dll` next
+  to `arke.exe` in `target/<profile>/` and into test output directories automatically.

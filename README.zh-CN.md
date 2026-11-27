@@ -21,8 +21,10 @@ GPU 渲染，用 Rust 写成，只有一个小小的 exe。</p>
 **不会卡。** 列目录、排序、缩略图、文件夹大小、搜索、文件操作全都在后台进行。连不上的网络位置、
 十万个文件的文件夹，都不会让你滚动、打字或切换标签页时停住。
 
-**什么都找得到，而且马上。** Arke 为本地磁盘维护一份文件名索引。装上可选的后台服务后，它直接读取
-NTFS 的主文件表，几秒就能为几百万个文件建好索引，并持续跟随更改日志，打开时索引就是最新的。
+**什么都找得到，而且马上。** Arke 通过运行时动态加载的 Everything SDK（`Everything64.dll`）直连本机
+[Everything](https://www.voidtools.com/) 引擎，实现「整台电脑」与本地「含子文件夹」毫秒级文件名检索，并在
+Everything 未运行时自动静默拉起后台服务；检索结果继续结合 Arke 的访问频率（Frecency）与路径权重排序，
+同时保留当前目录实时模糊筛选与 `content:` 文件正文搜索（详见 [docs/search-everything.md](docs/search-everything.md)）。
 
 **文件操作不用等。** 两万个文件的文件夹删到回收站只要 0.2 秒，文件资源管理器要 47 秒，还原也照常。
 复制、移动会显示进度，同一块磁盘上的任务会排队，可以暂停，也能撤销。
@@ -97,10 +99,11 @@ Arke 登上了[阮一峰《科技爱好者周刊》第 420 期](https://www.ruan
   QuickLook 的话，空格键也可以改成打开 QuickLook。
 
 **搜索**
-- 边打边搜索，范围可以是当前文件夹、包含子文件夹或整台电脑，支持模糊匹配和类型、大小、日期筛选
-  （见[搜索语法](#搜索语法)）。
+- 边打边搜索，范围可以是当前文件夹（纯内存模糊筛选）、包含子文件夹（本地磁盘无 `content:` 时走 Everything，
+  其余自动回退目录遍历）或整台电脑（Everything 引擎），支持类型、大小、日期筛选（见[搜索语法](#搜索语法)与
+  [docs/search-everything.md](docs/search-everything.md)）。
 - 搜索文件内容，连 PDF 和 Office 文档里的文字都能找到（当前文件夹和子文件夹）。
-- 整台电脑的结果会把你常打开的文件和文件夹排在前面。
+- 整台电脑与本地子文件夹的结果会把你常打开的文件和文件夹排在前面（沿用 Arke 的 `SearchHistory` 排序）。
 
 **文件操作**
 - 交给 Windows 的引擎，有进度、撤销和重做。同一块磁盘上的任务会排队、可以暂停，也可以选择复制后校验，
@@ -128,6 +131,7 @@ Arke 登上了[阮一峰《科技爱好者周刊》第 420 期](https://www.ruan
   右键会多出扩展命令，和文件资源管理器一样。
 - 启动器和脚本（Listary、ALTRun、AutoHotkey、PowerShell）可以通过一个 JSON 接口读取 Arke 的窗口、标签页和
   选中的项目，也能打开文件夹（[docs/integration.md](docs/integration.md)）。
+- 内置文件对话框自动跳转：在 **设置 › 启动** 开启“文件对话框自动跳转到 Arke 目录”后，从 Arke 切回其他程序的打开／保存对话框会自动跳转到 Arke 当前活动目录（或在对话框内按 `Ctrl+G` 手动跳转），保留原有文件名，无需第三方工具（[docs/dialog-jump.md](docs/dialog-jump.md)）。
 - 闲置时很安静：画面没变就不重绘，最小化时也一样。文件夹大小、索引和搜索服务以低优先级、Windows 的效率
   模式运行；只剩系统托盘图标时，Arke 会释放缓存。
 - 可以选择（实验性）让文件夹改用 Arke 打开，代替文件资源管理器（其他程序打开的文件夹也算），连浏览器的
@@ -208,10 +212,11 @@ scoop install arke/arke
 Arke 一天最多向 GitHub 检查一次新版本，你同意后才会安装（设置 › 关于）。
 
 <details>
-<summary><b>可选的后台服务</b></summary>
+<summary><b>Everything 搜索引擎说明</b></summary>
 
-设置 › 搜索 › 实时更新 可以安装一个小的 Windows 服务（需要管理员同意）。它只读取文件系统的更改日志
-和主文件表，不读文件内容，也不会报告其他用户个人文件夹里的名称。在同一个地方可以卸载。
+「整台电脑」与本地「含子文件夹」检索由本机 [Everything](https://www.voidtools.com/) 提供（不再需要安装 UAC 后台索引服务 `arke-indexd`）。
+Arke 在运行时动态加载同级目录下的 `Everything64.dll`（缺失时不崩溃），检测到 Everything 未运行时会自动探测并静默拉起 `Everything.exe -startup`；
+在 设置 › 搜索 中可以查看连接状态、重新连接或触发重建数据库。
 
 </details>
 
@@ -366,9 +371,10 @@ cargo lint                     # clippy，和 CI 一样严格
 
 | 路径 | |
 | --- | --- |
-| `crates/core` | 和平台无关的部分：列目录、排序、筛选、搜索、索引 |
-| `crates/app` | GPUI 界面和 Windows 集成 |
-| `crates/indexd` | 可选的后台服务（主文件表和 USN 更改日志） |
+| `crates/core` | 和平台无关的部分：列目录、排序、筛选、正文搜索、Everything 查询语法转译（`everything_query`） |
+| `crates/app` | GPUI 界面、Windows 集成与 Everything 运行时驱动（`win_everything`） |
+| `crates/indexd` | 原可选后台服务（生产模式已停用，由 Everything 引擎替代） |
+| `third_party/everything` | 内置 `Everything64.dll`，构建时由 `build.rs` 自动复制到输出目录 |
 | `tools/xtask` | 发版工具：changeset、升版、打包、发布 |
 
 Arke 暂时不接受 PR，但非常欢迎用 [issue](https://github.com/Koimsurai/Arke/issues) 报告问题或提建议。

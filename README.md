@@ -22,9 +22,11 @@ GPU-rendered, written in Rust, one small exe.</p>
 all run off the UI thread. An unreachable network share or a folder with 100,000 files doesn't
 stop you from scrolling, typing or switching tabs.
 
-**It finds anything, instantly.** Arke keeps a file name index of your local drives. With the
-optional background service it reads the NTFS master file table directly, indexing millions of
-files in seconds, and follows the change journal so the index is current the moment you open it.
+**It finds anything, instantly.** Whole-PC and local subfolder file name searches are powered by
+[Everything](https://www.voidtools.com/) via a runtime-loaded `Everything64.dll` SDK driver,
+silently launching `Everything.exe -startup` when needed without requiring an elevated UAC service.
+Results are still ranked by Arke's visit history (frecency) and path signals, while in-folder fuzzy
+filtering and `content:` file-content search stay built in (see [docs/search-everything.md](docs/search-everything.md)).
 
 **File operations don't keep you waiting.** A folder of 20,000 files goes to the Recycle Bin in
 0.2 s instead of 47 s in File Explorer, and restores as usual. Copies and moves show their progress,
@@ -116,10 +118,12 @@ Arke was featured in [Ruan Yifeng's tech weekly #420](https://www.ruanyifeng.com
   (Ctrl+wheel), and with QuickLook installed, Space can open that instead.
 
 **Search**
-- As you type, in this folder, its subfolders or the whole computer, with fuzzy matching and
-  filters for type, size and date ([search syntax](#search-syntax)).
+- As you type, in this folder (in-memory fuzzy filter), its subfolders (Everything on local drives
+  without `content:`, falling back to folder walking otherwise), or the whole computer (Everything),
+  with filters for type, size and date ([search syntax](#search-syntax),
+  [docs/search-everything.md](docs/search-everything.md)).
 - Search inside files, including PDF and Office documents, in a folder and its subfolders.
-- Files and folders you open often come first in whole-computer results.
+- Files and folders you open often come first via Arke's `SearchHistory` frecency ranking.
 
 **Files**
 - Copy and move through the Windows shell engine with progress, undo and redo. Jobs on the same
@@ -160,6 +164,9 @@ Arke was featured in [Ruan Yifeng's tech weekly #420](https://www.ruanyifeng.com
   adds the extended ones, as in File Explorer.
 - Launchers and scripts (Listary, ALTRun, AutoHotkey, PowerShell) can read Arke's windows, tabs and
   selection and open folders through one JSON interface ([docs/integration.md](docs/integration.md)).
+- Built-in file dialog quick jump: enable "Jump file dialogs to Arke's folder" under **Settings › Startup**
+  to automatically switch other apps' Open/Save dialogs to Arke's active folder when switching back from
+  Arke (or press `Ctrl+G` inside the dialog), preserving any typed filename ([docs/dialog-jump.md](docs/dialog-jump.md)).
 - Quiet when idle: nothing on screen changing means nothing redrawn, minimized included. Folder
   sizes, indexing and the search service run at low priority in Windows' efficiency mode, and with
   only the tray icon left Arke frees its caches.
@@ -253,11 +260,13 @@ Arke checks GitHub for a new version at most once a day and only installs one wh
 GitHub is slow, you can set a download route there (see [Privacy](#privacy)).
 
 <details>
-<summary><b>Optional background service</b></summary>
+<summary><b>Everything search engine</b></summary>
 
-Settings › Search › Live updates installs a small Windows service, with administrator approval.
-It reads only the file system's change journal and master file table, never file contents, and
-never reports names inside other users' profile folders. You can remove it from the same place.
+Whole-PC and local subfolder searches use [Everything](https://www.voidtools.com/) instead of the
+legacy UAC `arke-indexd` background service. Arke loads `Everything64.dll` dynamically at runtime
+(missing DLLs degrade gracefully without crashing), automatically probes and launches
+`Everything.exe -startup` when it isn't running, and exposes status, Reconnect and Rebuild DB
+controls in Settings › Search.
 
 </details>
 
@@ -431,9 +440,10 @@ cargo lint                     # clippy, as strict as CI
 
 | Path | |
 | --- | --- |
-| `crates/core` | Platform-independent model: listing, sorting, filtering, search, index |
-| `crates/app` | The GPUI app and Windows integration |
-| `crates/indexd` | The optional background service (MFT and USN journal) |
+| `crates/core` | Platform-independent model: listing, sorting, filtering, content search, Everything query translation (`everything_query`) |
+| `crates/app` | The GPUI app, Windows integration and runtime Everything SDK driver (`win_everything`) |
+| `crates/indexd` | Legacy background index service (disabled in production in favor of Everything) |
+| `third_party/everything` | Bundled `Everything64.dll`, copied into output directories automatically by `build.rs` |
 | `tools/xtask` | Release tooling: changesets, versioning, packaging, publishing |
 
 Arke doesn't accept pull requests for now, but bug reports and ideas are very welcome as

@@ -2,6 +2,25 @@
 
 由 `cargo xtask version` 根据 `.changeset/` 中的文件生成；英文版是 [CHANGELOG.md](CHANGELOG.md)。
 
+## 未发布
+
+### 新功能与架构变更
+
+- **文件对话框自动跳转（Dialog Quick Switch）**：新增 [`crates/app/src/win_dialog_jump.rs`](crates/app/src/win_dialog_jump.rs)，支持从 Arke 窗口切回外部 `#32770` 打开／保存对话框时自动跳转至 Arke 当前活动目录，以及在对话框内按 `Ctrl + G` 手动拉取跳转（详见 [docs/dialog-jump.md](docs/dialog-jump.md)）
+  - 复用 `crates/app/src/api.rs` 进程内状态快照（新增 `active_folder_for_hwnd` / `active_folder_of_frontmost`），实时读取当前活动标签页与分屏窗格的本地／UNC 目录，自动过滤主页、回收站、搜索页、SFTP/WebDAV 与设置页
+  - 采用双线程架构（`dialog-jump-hook` 负责 `EVENT_SYSTEM_FOREGROUND` 与 `WH_KEYBOARD_LL`，`dialog-jump-worker` 串行执行注入），内置 `ArkeWindow.Popup` 容忍、300ms 防抖、全域点击鼠标释放同步、跨线程焦点强锁、多语言地址栏回环校验与待保存文件名无损复原
+  - 自动排除 Arke 自有 `--pick-file` 设置浏览弹窗与非文件类 `#32770` 对话框，遇到管理员权限对话框（UIPI）时优雅中止
+  - 在 **设置 › 启动** 新增「文件对话框自动跳转到 Arke 目录」开关（默认关闭，含 7 种界面语言翻译）并支持 `ARKE_NO_DIALOG_JUMP` 测试隔离
+- 将「整台电脑」及本地「含子文件夹」（无 `content:` 正文检索时）的检索引擎替换为 Everything SDK（`Everything64.dll`），保留「当前文件夹」内存模糊筛选与 `content:` 文件正文搜索（详见 [docs/search-everything.md](docs/search-everything.md)）
+- 新增运行时动态加载驱动 `crates/app/src/win_everything.rs`：缺失 DLL 时不崩溃，未检测到 Everything 运行时自动探测并静默拉起 `Everything.exe -startup`，单次 IPC 获取路径、大小、修改时间与隐藏属性
+- 新增 `crates/core/src/everything_query.rs` 将 Arke 搜索语法与筛选器芯片（`ext:`、`type:`、`size:`、`dm:`、`file:`、`folder:`、跳过构建目录与排除路径）转译为 Everything 查询；结果继续沿用 Arke 原有 `SearchHistory`（Frecency）+ 路径权重精排
+- 生产模式下停用自建本地索引、网络共享索引与 `arke-indexd` UAC 后台服务（文件夹大小计算自动回退目录遍历），更新「设置 › 搜索」与搜索面板状态栏为 Everything 状态及「重新连接 / 重建数据库」控制
+- 仓库内置 `third_party/everything/Everything64.dll`，由 `crates/app/build.rs` 在构建时自动复制到可执行文件及测试输出目录
+
+### 修复
+
+- 修复子文件夹 Everything 搜索传入 `limit = 5000` 时在 `clamp(limit, 3000)` 触发 `min > max` panic 的问题，改为独立的 `everything_candidate_cap` 边界计算并补充单元测试
+
 ## 0.9.2 (2026-11-25)
 
 ### 修复

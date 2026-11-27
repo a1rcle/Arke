@@ -1,5 +1,7 @@
 # The NTFS change journal and Arke
 
+> **Note:** Production builds of this branch now use **Everything (`Everything64.dll`)** as the search backend instead of Arke's built-in local index and `arke-indexd` service (see [docs/search-everything.md](search-everything.md)). The notes below are kept as background reference for the NTFS USN journal and legacy `arke-indexd` behavior.
+
 Every NTFS drive keeps a change journal (the USN journal): a running list of the files and folders
 that were created, renamed, changed or deleted on it. Windows keeps it, not Arke, and one journal is
 shared by every program that reads it, such as Windows Search, backup tools and Everything.

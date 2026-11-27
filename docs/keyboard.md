@@ -224,6 +224,14 @@ Right, Ctrl+Left and Ctrl+Right by word, Home and End, Shift to select, Ctrl+A, 
 Ctrl+V, Ctrl+Z, Backspace, Delete, and Ctrl+Backspace or Ctrl+Delete by word. Enter confirms and
 Esc cancels.
 
+## External file dialogs
+
+When **Settings › Startup › Jump file dialogs to Arke's folder** is on ([docs/dialog-jump.md](dialog-jump.md)):
+
+| Keys | Action |
+| --- | --- |
+| Ctrl+G | Inside another app's Windows Open/Save dialog (`#32770`): jump the dialog to Arke's active folder while preserving the typed filename (passed through untouched outside file dialogs) |
+
 ## Reporting a problem
 
 If something cannot be reached or is not announced, open an

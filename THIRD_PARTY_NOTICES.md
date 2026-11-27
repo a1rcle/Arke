@@ -34,6 +34,16 @@ remaining dependencies are permissively licensed (MIT, Apache-2.0, BSD, Zlib and
 unmodified. `cargo deny check licenses` enforces the allowlist in `deny.toml`, and
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) lists each crate with its license text.
 
+## Everything SDK (`Everything64.dll`)
+
+- License: MIT License
+- Copyright © 2016 David Carpenter (voidtools)
+- Source: <https://www.voidtools.com/support/everything/sdk/>
+
+`third_party/everything/Everything64.dll` is bundled for development/runtime IPC queries against a
+locally installed Everything service, loaded dynamically at run time by
+`crates/app/src/win_everything.rs`.
+
 ## RAR and compressed tars (no bundled code)
 
 Arke contains no RAR decoder. RAR, `.tar.xz`, `.tar.bz2` and `.tar.zst` are read by the copy of
