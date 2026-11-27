@@ -34,6 +34,7 @@ use crate::a11y::A11yExt as _;
 use crate::assets::Icon;
 use crate::global_search::{Found, GlobalSearch};
 use crate::theme::{self, UiFont as _};
+use crate::win_everything::EverythingState;
 use crate::workspace::TooltipBelowExt as _;
 
 actions!(
@@ -219,6 +220,56 @@ fn to_results(found: Found, generation: arke_core::service::Gen) -> SearchResult
         contents: false,
         read: 0,
         similar,
+    }
+}
+
+/// Convert Everything hits under `root` into subfolder search results with paths relative to
+/// `root`, matching the format produced by [`arke_core::SearchService`].
+fn to_results_under(
+    found: Found,
+    root: PathBuf,
+    generation: arke_core::service::Gen,
+) -> SearchResults {
+    let root_str = root.to_string_lossy();
+    let prefix_len = root_str.trim_end_matches(['\\', '/']).len();
+    let hits: Vec<Arc<SearchHit>> = found
+        .exact
+        .into_iter()
+        .map(|hit| {
+            let name = hit.path.file_name().map_or_else(
+                || hit.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let kind = if hit.is_dir {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            };
+            let full = hit.path.to_string_lossy();
+            let rel = full
+                .get(prefix_len..)
+                .map(|s| s.trim_start_matches(['\\', '/']))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| full.as_ref());
+            Arc::new(SearchHit {
+                rel: Arc::from(rel),
+                entry: Entry::new(name.as_str(), kind, hit.size, hit.modified, 0),
+                snippet: None,
+            })
+        })
+        .collect();
+    SearchResults {
+        generation,
+        root,
+        matched: u32::try_from(hits.len()).unwrap_or(u32::MAX),
+        hits: Arc::new(hits),
+        scanned: 0,
+        errors: 0,
+        searching: false,
+        truncated: false,
+        contents: false,
+        read: 0,
+        similar: 0,
     }
 }
 
@@ -475,7 +526,15 @@ impl Explorer {
             }
             PanelItem::IndexRebuild => {
                 if let Some(global) = GlobalSearch::global(cx) {
-                    global.read(cx).rebuild();
+                    let reconnect = {
+                        let g = global.read(cx);
+                        g.uses_everything() && g.everything_state != EverythingState::Ready
+                    };
+                    if reconnect {
+                        global.update(cx, GlobalSearch::ensure_everything);
+                    } else {
+                        global.read(cx).rebuild();
+                    }
                 }
             }
         }
@@ -573,6 +632,7 @@ impl Explorer {
         let search = GlobalSearch::global(cx).and_then(|g| {
             let g = g.read(cx);
             self.global_count = g.total_count();
+            self.global_everything_state = g.everything_state;
             if query.is_empty() || !g.enabled() {
                 None
             } else {
@@ -609,9 +669,59 @@ impl Explorer {
         }));
     }
 
-    /// Subscribe to index status on first use of "this PC": requery when built or refreshed, redraw
-    /// on other changes (build progress).
-    fn watch_global(&mut self, cx: &mut Context<Self>) {
+    /// Queries Everything restricted to `root` for local Subfolders search (no `content:` term).
+    pub(super) fn run_subfolders_everything(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.watch_global(cx);
+        self.global_serial += 1;
+        let serial = self.global_serial;
+        let query = self.query.trim().to_string();
+        let search = GlobalSearch::global(cx).and_then(|g| {
+            let g = g.read(cx);
+            self.global_everything_state = g.everything_state;
+            if query.is_empty() {
+                None
+            } else {
+                g.search_in_dir(
+                    root.clone(),
+                    query.clone(),
+                    self.show_hidden,
+                    arke_core::search::MAX_HITS,
+                    cx,
+                )
+            }
+        });
+        let Some(search) = search else {
+            self.global_task = None;
+            self.search_results = None;
+            self.search_cursor = None;
+            cx.notify();
+            return;
+        };
+        self.global_task = Some(cx.spawn(async move |this, cx| {
+            let found = search.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.global_serial != serial || this.scope() != Scope::Subfolders {
+                    return;
+                }
+                let results =
+                    this.without_gone(to_results_under(found, root, this.search.current_gen()));
+                let results = this.arrange_results(results);
+                let len = results.hits.len();
+                this.search_cursor = match this.search_cursor {
+                    _ if len == 0 => None,
+                    Some(ix) => Some(ix.min(len - 1)),
+                    None if this.similar_focused() => None,
+                    None => Some(0),
+                };
+                this.search_results = Some(results);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Subscribe to search backend status: requery when the index builds/refreshes or Everything
+    /// finishes starting.
+    pub(super) fn watch_global(&mut self, cx: &mut Context<Self>) {
         if self.global_watch.is_some() {
             return;
         }
@@ -619,14 +729,32 @@ impl Explorer {
             return;
         };
         self.global_watch = Some(cx.observe(&global, |this: &mut Self, global, cx| {
-            if this.scope() != Scope::Computer {
-                return;
+            let (count, ev_state, uses_ev) = {
+                let g = global.read(cx);
+                (g.total_count(), g.everything_state, g.uses_everything())
+            };
+            match this.scope() {
+                Scope::Computer => {
+                    if uses_ev {
+                        if ev_state != this.global_everything_state {
+                            this.global_everything_state = ev_state;
+                            if ev_state == EverythingState::Ready {
+                                this.run_global(cx);
+                            }
+                        }
+                    } else if count != this.global_count {
+                        this.run_global(cx);
+                    }
+                    cx.notify();
+                }
+                Scope::Subfolders if uses_ev && ev_state != this.global_everything_state => {
+                    this.global_everything_state = ev_state;
+                    if ev_state == EverythingState::Ready && !this.nothing_to_search() {
+                        this.update_search(cx);
+                    }
+                }
+                _ => {}
             }
-            let count = global.read(cx).total_count();
-            if count != this.global_count {
-                this.run_global(cx);
-            }
-            cx.notify();
         }));
     }
 
@@ -679,19 +807,104 @@ impl Explorer {
                 Some(t!("search.syntax").into_owned()),
             ));
         }
-        let building = GlobalSearch::global(cx).is_some_and(|g| g.read(cx).status.count.is_none());
-        if building && self.search_results.is_none() {
-            return Some(Self::empty_state(
+        if let Some(global) = GlobalSearch::global(cx) {
+            let (uses_ev, ev_state, count_none) = {
+                let g = global.read(cx);
+                (
+                    g.uses_everything(),
+                    g.everything_state,
+                    g.status.count.is_none(),
+                )
+            };
+            if uses_ev {
+                match ev_state {
+                    EverythingState::Ready => return None,
+                    EverythingState::Starting => {
+                        return Some(Self::empty_state(
+                            svg()
+                                .path(Icon::Drive.path())
+                                .size(theme::s_32())
+                                .text_color(theme::text_subtle())
+                                .into_any_element(),
+                            t!("search.everything_starting").into_owned(),
+                            Some(t!("scope.building_hint").into_owned()),
+                        ));
+                    }
+                    EverythingState::Idle
+                    | EverythingState::DllMissing
+                    | EverythingState::NotInstalled
+                    | EverythingState::NotRunning => {
+                        return Some(Self::everything_unavailable_state(cx));
+                    }
+                }
+            }
+            if count_none && self.search_results.is_none() {
+                return Some(Self::empty_state(
+                    svg()
+                        .path(Icon::Drive.path())
+                        .size(theme::s_32())
+                        .text_color(theme::text_subtle())
+                        .into_any_element(),
+                    index_status_text(cx).unwrap_or_default(),
+                    Some(t!("scope.building_hint").into_owned()),
+                ));
+            }
+        }
+        None
+    }
+
+    fn everything_unavailable_state(cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(theme::s_8())
+            .child(
                 svg()
                     .path(Icon::Drive.path())
                     .size(theme::s_32())
                     .text_color(theme::text_subtle())
-                    .into_any_element(),
-                index_status_text(cx).unwrap_or_default(),
-                Some(t!("scope.building_hint").into_owned()),
-            ));
-        }
-        None
+                    .opacity(0.7),
+            )
+            .child(
+                div()
+                    .text_size(theme::fs_15())
+                    .text_color(theme::text_muted())
+                    .child(index_status_text(cx).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .max_w(crate::theme::scaled_px(420.))
+                    .text_center()
+                    .text_size(theme::fs_12())
+                    .text_color(theme::text_subtle())
+                    .child(t!("search.everything_hint").to_string()),
+            )
+            .child(
+                div()
+                    .id("scope-everything-reconnect")
+                    .a11y_button(t!("search.everything_reconnect"))
+                    .mt(theme::s_8())
+                    .h(theme::h_ctl())
+                    .px(theme::s_16())
+                    .flex()
+                    .items_center()
+                    .rounded(theme::r_8())
+                    .cursor_pointer()
+                    .bg(theme::signal())
+                    .text_color(theme::on_signal())
+                    .hover(|s| s.opacity(0.9))
+                    .child(t!("search.everything_reconnect").to_string())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(global) = GlobalSearch::global(cx) {
+                            global.update(cx, GlobalSearch::ensure_everything);
+                        }
+                        this.run_global(cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     fn computer_off_state(cx: &mut Context<Self>) -> AnyElement {
@@ -1131,12 +1344,22 @@ impl Explorer {
     }
 }
 
-/// Index status ("this PC N items · live updates…"); `None` when off.
+/// Index status ("Everything · ready" or test index status); `None` when off.
 fn index_status_text(cx: &App) -> Option<String> {
     let global = GlobalSearch::global(cx)?;
     let global = global.read(cx);
     if !global.enabled() {
         return None;
+    }
+    if global.uses_everything() {
+        let key = match global.everything_state {
+            EverythingState::Ready => "search.everything_ready",
+            EverythingState::Starting => "search.everything_starting",
+            EverythingState::DllMissing => "search.everything_dll_missing",
+            EverythingState::NotInstalled => "search.everything_not_installed",
+            EverythingState::Idle | EverythingState::NotRunning => "search.everything_not_running",
+        };
+        return Some(t!(key).into_owned());
     }
     let status = global.status;
     let text = match (status.count, status.scanning) {
@@ -1167,7 +1390,7 @@ fn index_status_text(cx: &App) -> Option<String> {
 }
 
 /// "This PC" index controls: the background service (`Some((installed, busy))` once known) and
-/// whether a rebuild can be started (only once built: changes made while off need it).
+/// whether a rebuild/reconnect action can be started.
 fn index_control_state(cx: &App) -> (Option<(bool, bool)>, bool) {
     let Some(global) = GlobalSearch::global(cx) else {
         return (None, false);
@@ -1175,6 +1398,9 @@ fn index_control_state(cx: &App) -> (Option<(bool, bool)>, bool) {
     let g = global.read(cx);
     if !g.enabled() {
         return (None, false);
+    }
+    if g.uses_everything() {
+        return (None, g.everything_state != EverythingState::Starting);
     }
     let status = g.status;
     (
@@ -1184,13 +1410,17 @@ fn index_control_state(cx: &App) -> (Option<(bool, bool)>, bool) {
     )
 }
 
-/// Controls for "this PC" in the panel: live updates (background service), rebuild index.
+/// Controls for "this PC" in the panel: rebuild/reconnect for Everything, or legacy service +
+/// rebuild controls in fake-root tests.
 fn index_controls(cursor: Option<PanelItem>, cx: &mut Context<Explorer>) -> Vec<AnyElement> {
     let Some(global) = GlobalSearch::global(cx) else {
         return Vec::new();
     };
     let (service, rebuild) = index_control_state(cx);
-    let status = global.read(cx).status;
+    let (uses_ev, ev_state, status) = {
+        let g = global.read(cx);
+        (g.uses_everything(), g.everything_state, g.status)
+    };
     let mut out = Vec::new();
     if let Some((installed, busy)) = service {
         let tip = if busy {
@@ -1229,7 +1459,10 @@ fn index_controls(cursor: Option<PanelItem>, cx: &mut Context<Explorer>) -> Vec<
         );
     }
     if rebuild {
-        let tip = if status.live {
+        let reconnect = uses_ev && ev_state != EverythingState::Ready;
+        let tip = if reconnect {
+            t!("search.everything_reconnect")
+        } else if uses_ev || status.live {
             t!("search.index_rebuild_live")
         } else {
             t!("search.index_rebuild")
@@ -1243,7 +1476,13 @@ fn index_controls(cursor: Option<PanelItem>, cx: &mut Context<Explorer>) -> Vec<
                 false,
                 cursor == Some(PanelItem::IndexRebuild),
             )
-            .on_click(move |_: &ClickEvent, _, cx| global.read(cx).rebuild())
+            .on_click(move |_: &ClickEvent, _, cx| {
+                if reconnect {
+                    global.update(cx, GlobalSearch::ensure_everything);
+                } else {
+                    global.read(cx).rebuild();
+                }
+            })
             .into_any_element(),
         );
     }

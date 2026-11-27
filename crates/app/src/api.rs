@@ -851,6 +851,42 @@ pub(crate) fn window_of(hwnd: isize) -> Option<u64> {
         .map(|(id, _)| *id)
 }
 
+/// The active filesystem folder of the Arke window `hwnd`, if its active pane shows a local
+/// folder, drive root, or UNC share ([`Location::Folder`]). Remote URLs, Home, Recycle Bin,
+/// Search results and Settings pages return `None`.
+pub(crate) fn active_folder_for_hwnd(hwnd: isize) -> Option<PathBuf> {
+    let state = WINDOWS
+        .lock()
+        .values()
+        .find(|p| p.state.hwnd == hwnd)
+        .map(|p| Arc::clone(&p.state))?;
+    active_folder_of(&state)
+}
+
+/// `(hwnd, folder)` of the frontmost `ArkeWindow` in Windows Z-order currently showing a
+/// filesystem folder ([`Location::Folder`]). Used by manual `Ctrl+G` dialog jump when no MRU
+/// source window is alive.
+pub(crate) fn active_folder_of_frontmost() -> Option<(isize, PathBuf)> {
+    let order = z_order();
+    let snap = snapshot(Some(&order));
+    snap.windows
+        .into_iter()
+        .find_map(|w| active_folder_of(&w).map(|p| (w.hwnd, p)))
+}
+
+fn active_folder_of(window: &WindowState) -> Option<PathBuf> {
+    let tab = window.tabs.get(window.active_tab)?;
+    let pane = tab.panes.get(tab.active_pane)?;
+    match &pane.location {
+        Location::Folder(path) => Some(path.clone()),
+        Location::Remote(_)
+        | Location::Search { .. }
+        | Location::Home
+        | Location::RecycleBin
+        | Location::Other => None,
+    }
+}
+
 /// The published windows: in `order` (HWNDs front to back), leaving out those not in it, or in
 /// the order they opened.
 pub(crate) fn snapshot(order: Option<&[isize]>) -> Snapshot {
@@ -1288,5 +1324,52 @@ mod tests {
         assert_eq!(probe(&here), Probe::Folder);
         assert_eq!(probe(&here.join("arke-api-no-such-thing")), Probe::Missing);
         assert_eq!(probe(Path::new("sftp://host/x")), Probe::Unknown);
+    }
+
+    #[test]
+    fn active_folder_of_picks_active_tab_and_pane_folder_only() {
+        let pane = |location| PaneState {
+            location,
+            selection: Vec::new(),
+        };
+        let window = WindowState {
+            hwnd: 0x100,
+            active_tab: 1,
+            tabs: vec![
+                TabState {
+                    active_pane: 0,
+                    panes: vec![pane(Location::Folder(PathBuf::from(r"C:\Tab0")))],
+                },
+                TabState {
+                    active_pane: 1,
+                    panes: vec![
+                        pane(Location::Folder(PathBuf::from(r"C:\Left"))),
+                        pane(Location::Folder(PathBuf::from(r"D:\Right"))),
+                    ],
+                },
+            ],
+        };
+        assert_eq!(active_folder_of(&window), Some(PathBuf::from(r"D:\Right")));
+
+        for non_folder in [
+            Location::Remote("sftp://host/home".into()),
+            Location::Search {
+                path: Some(PathBuf::from(r"D:\Work")),
+                query: "report".into(),
+            },
+            Location::Home,
+            Location::RecycleBin,
+            Location::Other,
+        ] {
+            let win = WindowState {
+                hwnd: 0x101,
+                active_tab: 0,
+                tabs: vec![TabState {
+                    active_pane: 0,
+                    panes: vec![pane(non_folder)],
+                }],
+            };
+            assert_eq!(active_folder_of(&win), None);
+        }
     }
 }

@@ -1658,31 +1658,6 @@ impl Workspace {
         let mut startup = vec![
             card(
                 Icon::WindowStart,
-                t!("settings.start_menu"),
-                Some(t!("settings.start_menu_desc")),
-                switch("start-menu", s.start_menu, |st| {
-                    st.start_menu = !st.start_menu;
-                    st.start_menu_offered = true;
-                }),
-            ),
-            card(
-                Icon::Bolt,
-                t!("settings.autostart"),
-                Some(t!("settings.autostart_desc")),
-                switch("autostart", s.autostart, |st| {
-                    st.autostart = !st.autostart;
-                }),
-            ),
-            card(
-                Icon::Tray,
-                t!("settings.tray"),
-                None,
-                switch("tray-icon", s.tray_icon, |st| {
-                    st.tray_icon = !st.tray_icon;
-                }),
-            ),
-            card(
-                Icon::WindowStart,
                 t!("settings.start"),
                 None,
                 choice(
@@ -1735,6 +1710,14 @@ impl Workspace {
                 }),
             ),
             card(
+                Icon::External,
+                t!("settings.dialog_jump"),
+                Some(t!("settings.dialog_jump_desc")),
+                switch("dialog-jump", s.dialog_jump, |st| {
+                    st.dialog_jump = !st.dialog_jump;
+                }),
+            ),
+            card(
                 Icon::TabOpen,
                 t!("settings.single_window"),
                 Some(t!("settings.single_window_desc")),
@@ -1744,9 +1727,35 @@ impl Workspace {
             ),
         ];
         // The installer made its own Start menu shortcut; Arke's would only duplicate it.
-        if crate::update::installed_by_setup() {
-            startup.remove(0);
+        if !crate::update::installed_by_setup() {
+            startup.push(card(
+                Icon::WindowStart,
+                t!("settings.start_menu"),
+                Some(t!("settings.start_menu_desc")),
+                switch("start-menu", s.start_menu, |st| {
+                    st.start_menu = !st.start_menu;
+                    st.start_menu_offered = true;
+                }),
+            ));
         }
+        startup.extend([
+            card(
+                Icon::Bolt,
+                t!("settings.autostart"),
+                Some(t!("settings.autostart_desc")),
+                switch("autostart", s.autostart, |st| {
+                    st.autostart = !st.autostart;
+                }),
+            ),
+            card(
+                Icon::Tray,
+                t!("settings.tray"),
+                None,
+                switch("tray-icon", s.tray_icon, |st| {
+                    st.tray_icon = !st.tray_icon;
+                }),
+            ),
+        ]);
         let search = search_page(s, cx);
         let route_focused = page.route_input.focus_handle(cx).is_focused(window);
         let update = super::update_page::update_card(
@@ -1838,7 +1847,7 @@ impl Workspace {
                 (Some(t!("settings.group_details")), &[0, 1, 2, 6, 7]),
             ],
         );
-        let startup = regroup(startup, &[(None, &[3, 4, 5, 6, 7, 0, 1, 2])]);
+        let startup = vec![group(None, startup)];
         let about = vec![about_header(), group(None, about)];
         vec![
             (t!("settings.appearance"), Icon::Theme, appearance),
@@ -4159,10 +4168,62 @@ fn service_desc(cx: &App) -> Cow<'static, str> {
 /// Above this many indexed items, suggest adding only frequently used subfolders.
 const LARGE_NETWORK_INDEX: usize = 1_000_000;
 
+/// Everything engine status description and action button for Settings › Search.
+fn everything_card(cx: &App) -> AnyElement {
+    use crate::win_everything::EverythingState;
+
+    let state = crate::global_search::GlobalSearch::global(cx)
+        .map_or(EverythingState::Idle, |g| g.read(cx).everything_state);
+    let desc = match state {
+        EverythingState::Ready => t!("search.everything_ready"),
+        EverythingState::Starting => t!("search.everything_starting"),
+        EverythingState::DllMissing => t!("search.everything_dll_missing"),
+        EverythingState::NotInstalled => t!("search.everything_not_installed"),
+        EverythingState::Idle | EverythingState::NotRunning => t!("search.everything_not_running"),
+    };
+    let control = match state {
+        EverythingState::Starting => div()
+            .text_size(theme::fs_12())
+            .text_color(theme::text_muted())
+            .child(t!("search.everything_starting").to_string())
+            .into_any_element(),
+        EverythingState::Ready => text_button(
+            "search-everything-rebuild",
+            t!("settings.everything_rebuild"),
+            |_: &ClickEvent, _, cx: &mut App| {
+                if let Some(global) = crate::global_search::GlobalSearch::global(cx) {
+                    global.read(cx).rebuild();
+                }
+            },
+        ),
+        EverythingState::Idle
+        | EverythingState::DllMissing
+        | EverythingState::NotInstalled
+        | EverythingState::NotRunning => text_button(
+            "search-everything-reconnect",
+            t!("search.everything_reconnect"),
+            |_: &ClickEvent, _, cx: &mut App| {
+                if let Some(global) = crate::global_search::GlobalSearch::global(cx) {
+                    global.update(cx, crate::global_search::GlobalSearch::ensure_everything);
+                    cx.refresh_windows();
+                }
+            },
+        ),
+    };
+    card(
+        Icon::Bolt,
+        t!("settings.everything_engine"),
+        Some(desc),
+        control,
+    )
+}
+
 /// Settings › Search. The whole-PC switch comes first; everything else only matters while it is
 /// on, so it is dimmed and can't be clicked otherwise.
 fn search_page(s: &Settings, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let on = s.global_search;
+    let uses_everything = crate::global_search::GlobalSearch::global(cx)
+        .is_some_and(|g| g.read(cx).uses_everything());
     let main = group(
         None,
         vec![card(
@@ -4174,6 +4235,16 @@ fn search_page(s: &Settings, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
             }),
         )],
     );
+    let engine_card = if uses_everything {
+        everything_card(cx)
+    } else {
+        card(
+            Icon::Bolt,
+            t!("settings.service"),
+            Some(service_desc(cx)),
+            service_control(cx),
+        )
+    };
     let index = group(
         Some(t!("settings.search_index")),
         vec![
@@ -4185,12 +4256,7 @@ fn search_page(s: &Settings, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
                     st.search_skip_build_dirs = !st.search_skip_build_dirs;
                 }),
             ),
-            card(
-                Icon::Bolt,
-                t!("settings.service"),
-                Some(service_desc(cx)),
-                service_control(cx),
-            ),
+            engine_card,
         ],
     );
     let ranking = group(
@@ -4202,17 +4268,16 @@ fn search_page(s: &Settings, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
         Some(t!("settings.search_scope_desc")),
         search_scope_rows(s, crate::win::fixed_drive_roots()),
     );
-    let network = group_with(
-        Some(t!("settings.search_network")),
-        Some(t!("settings.search_network_desc")),
-        network_search_rows(s, cx),
-    );
+    let mut sections = vec![index, ranking, scope];
+    if !uses_everything {
+        sections.push(group_with(
+            Some(t!("settings.search_network")),
+            Some(t!("settings.search_network_desc")),
+            network_search_rows(s, cx),
+        ));
+    }
     let mut out = vec![main];
-    out.extend(
-        [index, ranking, scope, network]
-            .into_iter()
-            .map(|section| needs(on, section)),
-    );
+    out.extend(sections.into_iter().map(|section| needs(on, section)));
     out
 }
 

@@ -109,9 +109,11 @@ mod win_bin_evict;
 mod win_bin_usage;
 mod win_cloud;
 mod win_devnotify;
+mod win_dialog_jump;
 mod win_dragimage;
 mod win_e_hook;
 mod win_eject;
+mod win_everything;
 mod win_fast_copy;
 mod win_fast_recycle;
 mod win_fileops;
@@ -620,6 +622,7 @@ fn app_main(mut args: Args) {
         let api_queue = start_api(cx, &services);
         if bench.is_none() {
             follow_drive_removals(cx, Arc::clone(&services.remotes));
+            follow_dialog_jump_setting(&store, cx);
             teracopy::detect_in_background();
             quicklook::detect_in_background();
         }
@@ -880,6 +883,39 @@ fn follow_takeover_setting(
         }
     };
     // Settings may already be loaded; the observer only hears later changes.
+    apply(store.read(cx));
+    cx.observe(store, move |store, cx| apply(store.read(cx)))
+        .detach();
+}
+
+/// "Jump file dialogs to Arke's folder": while the setting is on, switching from Arke to an
+/// external `#32770` Open/Save dialog (or pressing `Ctrl+G` inside it) navigates that dialog to
+/// Arke's active folder (`win_dialog_jump.rs`). Turning the setting off stops both hooks at once.
+/// `ARKE_NO_DIALOG_JUMP` disables it for automated tests.
+fn follow_dialog_jump_setting(store: &gpui::Entity<settings::SettingsStore>, cx: &mut App) {
+    if std::env::var_os("ARKE_NO_DIALOG_JUMP").is_some() {
+        return;
+    }
+    let watcher: std::rc::Rc<std::cell::RefCell<Option<win_dialog_jump::Watcher>>> =
+        std::rc::Rc::default();
+    let quit_watcher = std::rc::Rc::clone(&watcher);
+    cx.on_app_quit(move |_| {
+        *quit_watcher.borrow_mut() = None;
+        async {}
+    })
+    .detach();
+    let apply = move |store: &settings::SettingsStore| {
+        if !store.loaded {
+            return;
+        }
+        let wanted = store.settings.dialog_jump;
+        let mut watcher = watcher.borrow_mut();
+        if wanted && watcher.is_none() {
+            *watcher = win_dialog_jump::Watcher::start();
+        } else if !wanted && watcher.is_some() {
+            *watcher = None;
+        }
+    };
     apply(store.read(cx));
     cx.observe(store, move |store, cx| apply(store.read(cx)))
         .detach();

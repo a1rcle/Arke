@@ -103,7 +103,7 @@ fn is_snapshot_name(name: &str) -> bool {
 }
 /// Build output and package cache folders (not entered with "skip build folders", but the folder
 /// itself stays findable): often hundreds of thousands of churning files nobody searches for.
-const BUILD_DIRS: [&str; 12] = [
+pub const BUILD_DIRS: [&str; 12] = [
     "node_modules",
     ".git",
     "__pycache__",
@@ -205,6 +205,25 @@ impl IndexHit {
             size,
             modified,
             highlights,
+            score,
+        }
+    }
+
+    /// Construct a hit produced by an external search engine (such as Everything), ready to be
+    /// ranked alongside visit history via [`crate::rank::merge`].
+    pub const fn from_external(
+        path: PathBuf,
+        is_dir: bool,
+        size: u64,
+        modified: Option<SystemTime>,
+        score: u32,
+    ) -> Self {
+        Self {
+            path,
+            is_dir,
+            size,
+            modified,
+            highlights: Vec::new(),
             score,
         }
     }

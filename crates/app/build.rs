@@ -103,6 +103,33 @@ fn delay_load() {
     println!("cargo:rustc-link-arg-bin=arke=delayimp.lib");
 }
 
+/// Copies the bundled `Everything64.dll` next to the built `arke.exe` (and into `deps/` for test
+/// binaries) so runtime dynamic loading finds it without manual setup.
+fn copy_everything_dll(manifest: &std::path::Path) {
+    let src = manifest.join("../../third_party/everything/Everything64.dll");
+    println!("cargo:rerun-if-changed={}", src.display());
+    if !src.exists() {
+        return;
+    }
+    let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let out_path = PathBuf::from(out_dir);
+    // Copy into OUT_DIR (where Cargo 1.100 places unit-test binaries) as well as target/<profile>.
+    let _ = std::fs::copy(&src, out_path.join("Everything64.dll"));
+    if let Some(target_dir) = out_path
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "build"))
+        .and_then(|p| p.parent())
+    {
+        let _ = std::fs::copy(&src, target_dir.join("Everything64.dll"));
+        let deps_dir = target_dir.join("deps");
+        if deps_dir.exists() {
+            let _ = std::fs::copy(&src, deps_dir.join("Everything64.dll"));
+        }
+    }
+}
+
 fn main() {
     // Arke uses Windows APIs throughout: say so up front instead of failing deep in the build.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -133,6 +160,7 @@ fn main() {
 
     pending_changesets(&manifest, &channel);
     delay_load();
+    copy_everything_dll(&manifest);
 
     println!("cargo:rerun-if-changed=arke.rc");
     println!("cargo:rerun-if-changed=assets/brand/arke.ico");

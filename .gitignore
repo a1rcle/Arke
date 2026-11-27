@@ -1,3 +1,22 @@
+# Build outputs
 /target
-*.pdb
 /dist
+*.pdb
+
+# Logs & temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+

@@ -643,6 +643,9 @@ pub(crate) struct Settings {
     /// With `open_folders_in_arke`, Win+E and File Explorer started from the taskbar or Start
     /// (the same verb) open Arke too. Off: File Explorer started on purpose stays File Explorer.
     pub(crate) win_e_opens_arke: bool,
+    /// Automatically jump Windows Open/Save file dialogs (`#32770`) to the folder shown in Arke
+    /// when switching back from Arke, or on Ctrl+G inside the dialog (`win_dialog_jump.rs`).
+    pub(crate) dialog_jump: bool,
     /// One window: folders from other programs (#11), Win+E and Arke started again open as a tab
     /// in the window used last instead of a window of their own. "Open in new window" still opens
     /// one. Before 0.7 `open_external_in_tab` (see [`Settings::migrate_single_window`]).
@@ -848,6 +851,7 @@ impl Default for Settings {
             keep_running: true,
             open_folders_in_arke: false,
             win_e_opens_arke: false,
+            dialog_jump: false,
             single_window: true,
             nav_scope: NavScope::AcrossTabs,
             swipe_nav: true,

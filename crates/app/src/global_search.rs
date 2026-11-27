@@ -17,11 +17,13 @@
 //!   watcher keeps them current. A share reached both through a mapped drive and as
 //!   `\\server\share` is indexed once.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::UNIX_EPOCH;
 
 use arke_core::Fs;
+use arke_core::everything_query::{EverythingQueryOptions, translate_query};
 use arke_core::index::IndexHit;
 use arke_core::index_query::{self as iq, NameMatch};
 use arke_core::index_service::{IndexOptions, IndexService, IndexStatus};
@@ -30,6 +32,7 @@ use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
 
 use crate::settings::SettingsStore;
 use crate::shell::{PlaceKind, Shell};
+use crate::win_everything::{self, EverythingState};
 
 /// Visited items at most added to one query's results.
 const FRECENT_MAX: usize = 32;
@@ -132,6 +135,10 @@ pub(crate) struct GlobalSearch {
     pub(crate) service_outdated: Option<String>,
     /// Install or remove in progress (waiting for UAC consent)
     pub(crate) service_busy: bool,
+    /// Everything backend connection state (used for real local drives).
+    pub(crate) everything_state: EverythingState,
+    /// Cancels an in-flight Everything startup/probe loop when dropped or replaced.
+    everything_cancel: Arc<AtomicBool>,
     _settings: Subscription,
     worker: Option<Task<()>>,
 }
@@ -181,6 +188,8 @@ impl GlobalSearch {
                 service_installed: None,
                 service_outdated: None,
                 service_busy: false,
+                everything_state: EverythingState::Idle,
+                everything_cancel: Arc::new(AtomicBool::new(false)),
                 _settings: sub,
                 worker: None,
             };
@@ -199,9 +208,72 @@ impl GlobalSearch {
         self.enabled
     }
 
+    /// Whether this instance uses the Everything search engine (true for real drives; false for
+    /// fake in-memory test roots).
+    pub(crate) const fn uses_everything(&self) -> bool {
+        matches!(self.roots, Roots::LocalDrives)
+    }
+
     /// Turn on global search (writes the setting; `sync` then starts it).
     pub(crate) fn enable(cx: &mut App) {
         SettingsStore::global(cx).update(cx, |s, cx| s.update(|st| st.global_search = true, cx));
+    }
+
+    /// Lazily connects to (or silently starts) Everything if it hasn't been probed yet.
+    pub(crate) fn ensure_everything_if_idle(&mut self, cx: &mut Context<Self>) {
+        if self.uses_everything() && self.everything_state == EverythingState::Idle {
+            self.ensure_everything(cx);
+        }
+    }
+
+    /// Re-probes or silently launches Everything in the background.
+    pub(crate) fn ensure_everything(&mut self, cx: &mut Context<Self>) {
+        if !self.uses_everything() {
+            return;
+        }
+        self.everything_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.everything_cancel = Arc::clone(&cancel);
+        self.everything_state = EverythingState::Starting;
+        cx.notify();
+
+        let (tx, rx) = flume::unbounded::<EverythingState>();
+        let flag = Arc::clone(&cancel);
+        crate::explorer::spawn_thread("everything-connect", move || {
+            let mut state = win_everything::ensure_service(&flag);
+            let _ = tx.send(state);
+            // If Everything launched but its database is still loading, keep polling so results
+            // populate automatically once the DB is ready.
+            if state == EverythingState::Starting {
+                for _ in 0..120 {
+                    if flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if win_everything::is_db_loaded() {
+                        state = EverythingState::Ready;
+                        let _ = tx.send(state);
+                        return;
+                    }
+                }
+                let _ = tx.send(EverythingState::NotRunning);
+            }
+        });
+
+        self.worker = Some(cx.spawn(async move |this, cx| {
+            let _cancel_on_drop = CancelOnDrop(cancel);
+            while let Ok(state) = rx.recv_async().await {
+                let updated = this.update(cx, |this, cx| {
+                    if this.everything_state != state {
+                        this.everything_state = state;
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
+        }));
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
@@ -212,6 +284,28 @@ impl GlobalSearch {
             settings.search_skipped_drives.clone(),
             settings.search_excluded.clone(),
         );
+        if self.uses_everything() {
+            self.skip_build_dirs = skip;
+            (self.skipped_drives, self.excluded) = scope;
+            self.net.clear();
+            self.publish_net();
+            if want != self.enabled {
+                self.enabled = want;
+                if want {
+                    self.ensure_everything(cx);
+                } else {
+                    self.everything_cancel.store(true, Ordering::Relaxed);
+                    self.worker = None;
+                    if self.everything_state != EverythingState::Ready {
+                        self.everything_state = EverythingState::Idle;
+                    }
+                }
+                cx.notify();
+            } else if want && self.everything_state == EverythingState::Idle {
+                self.ensure_everything(cx);
+            }
+            return;
+        }
         let want_net = if want {
             let real = matches!(self.roots, Roots::LocalDrives);
             let drives = if real {
@@ -538,9 +632,7 @@ impl GlobalSearch {
         Self::global(cx).and_then(|g| g.read(cx).service.clone())
     }
 
-    /// Query in the background; `None` when there's no index yet. Names that match as typed
-    /// come first (#396); similar ones (fuzzy) are looked for when `similar` asks, or when nothing
-    /// matches as typed, and only if the query can have any ([`iq::has_similar`]).
+    /// Query in the background; `None` when the backend isn't ready yet.
     pub(crate) fn search(
         &self,
         query: String,
@@ -548,6 +640,22 @@ impl GlobalSearch {
         similar: bool,
         cx: &App,
     ) -> Option<Task<Found>> {
+        if self.uses_everything() {
+            if self.everything_state != EverythingState::Ready {
+                return None;
+            }
+            let mut excluded = self.skipped_drives.clone();
+            excluded.extend(self.excluded.iter().cloned());
+            return Some(Self::spawn_everything_search(
+                None,
+                query,
+                true,
+                self.skip_build_dirs,
+                excluded,
+                limit,
+                cx,
+            ));
+        }
         let service = self.service.clone()?;
         let net: Vec<Arc<IndexService>> =
             self.net.iter().filter_map(|n| n.service.clone()).collect();
@@ -604,6 +712,140 @@ impl GlobalSearch {
             let _cancel_on_drop = CancelOnDrop(cancel);
             rx.recv_async().await.unwrap_or_default()
         }))
+    }
+
+    /// Whether `root` can be searched through Everything for a subfolder search (local fixed-style
+    /// drive path, no `content:` query, and Everything is ready).
+    pub(crate) fn can_search_subfolders(&self, root: &Path, query: &iq::Query) -> bool {
+        self.uses_everything()
+            && self.everything_state == EverythingState::Ready
+            && query.content_needle().is_none()
+            && is_local_drive_path(root)
+            && !is_network_path(root)
+    }
+
+    /// Queries Everything restricted to descendants of `root` (Subfolders scope).
+    pub(crate) fn search_in_dir(
+        &self,
+        root: PathBuf,
+        query: String,
+        show_hidden: bool,
+        limit: usize,
+        cx: &App,
+    ) -> Option<Task<Found>> {
+        if !self.uses_everything() || self.everything_state != EverythingState::Ready {
+            return None;
+        }
+        Some(Self::spawn_everything_search(
+            Some(root),
+            query,
+            show_hidden,
+            false,
+            Vec::new(),
+            limit,
+            cx,
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared worker builder for global and subfolder Everything queries"
+    )]
+    fn spawn_everything_search(
+        root: Option<PathBuf>,
+        query: String,
+        show_hidden: bool,
+        skip_build_dirs: bool,
+        excluded_paths: Vec<PathBuf>,
+        limit: usize,
+        cx: &App,
+    ) -> Task<Found> {
+        let history = crate::search_history::SearchHistory::snapshot_for_search(cx);
+        let signals = rank_signals(history);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = flume::bounded(1);
+        let flag = Arc::clone(&cancel);
+        crate::explorer::spawn_thread("everything-search", move || {
+            let cancel = flag.as_ref();
+            let clock = crate::win::clock();
+            let parsed = iq::Query {
+                names: NameMatch::Exact,
+                ..iq::Query::parse(&query, clock)
+            };
+            let opts = EverythingQueryOptions {
+                root: root.as_deref(),
+                skip_build_dirs,
+                excluded_paths: &excluded_paths,
+            };
+            let Some(translated) = translate_query(&parsed, clock, &opts) else {
+                let _ = tx.send(Found::default());
+                return;
+            };
+            let candidate_cap = everything_candidate_cap(limit);
+            let sort = if translated.prefer_newest {
+                win_everything::EVERYTHING_SORT_DATE_MODIFIED_DESCENDING
+            } else {
+                win_everything::EVERYTHING_SORT_RUN_COUNT_DESCENDING
+            };
+            let output =
+                match win_everything::execute_query(&translated.text, candidate_cap, sort, cancel) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        log::debug!("Everything query failed: {err:?}");
+                        let _ = tx.send(Found::default());
+                        return;
+                    }
+                };
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let root_lower = root.as_ref().map(|r| {
+                let mut s = r.to_string_lossy().to_lowercase();
+                if !s.ends_with('\\') {
+                    s.push('\\');
+                }
+                s
+            });
+            let mut hits = Vec::with_capacity(output.items.len());
+            for item in output.items {
+                if !show_hidden && item.hidden {
+                    continue;
+                }
+                if let Some(ref prefix) = root_lower {
+                    let p_lower = item.path.to_string_lossy().to_lowercase();
+                    if !p_lower.starts_with(prefix) || p_lower.len() <= prefix.len() {
+                        continue;
+                    }
+                }
+                let name = item.path.file_name().map_or_else(
+                    || item.path.to_string_lossy(),
+                    std::ffi::OsStr::to_string_lossy,
+                );
+                let modified_secs = item
+                    .modified
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+                if !parsed.accepts(&name, item.is_dir, item.size, modified_secs) {
+                    continue;
+                }
+                hits.push(IndexHit::from_external(
+                    item.path,
+                    item.is_dir,
+                    item.size,
+                    item.modified,
+                    0,
+                ));
+            }
+            let exact = arke_core::rank::merge(hits, Vec::new(), &parsed, &signals, limit);
+            let _ = tx.send(Found {
+                exact,
+                similar: None,
+            });
+        });
+        cx.background_executor().spawn(async move {
+            let _cancel_on_drop = CancelOnDrop(cancel);
+            rx.recv_async().await.unwrap_or_default()
+        })
     }
 
     /// Install or remove the background service (UAC prompt). Restarts indexing afterwards to use
@@ -666,8 +908,14 @@ impl GlobalSearch {
         .detach();
     }
 
-    /// Rewalk everything ("Rebuild").
+    /// Rewalk everything ("Rebuild"), or ask Everything to rebuild its database.
     pub(crate) fn rebuild(&self) {
+        if self.uses_everything() {
+            crate::explorer::spawn_thread("everything-rebuild", || {
+                let _ = win_everything::rebuild_db();
+            });
+            return;
+        }
         if let Some(service) = &self.service {
             service.rebuild();
         }
@@ -693,6 +941,18 @@ fn service_outdated(installed: Option<String>) -> Option<String> {
             Some(String::from("?"))
         }
     }
+}
+
+/// Upper bound on Everything candidates fetched for reranking when `limit` is below it.
+const MAX_EVERYTHING_CANDIDATES: usize = 5_000;
+
+/// Computes how many candidates to request from Everything for a given UI result `limit`.
+fn everything_candidate_cap(limit: usize) -> u32 {
+    let cap = limit
+        .saturating_mul(3)
+        .min(MAX_EVERYTHING_CANDIDATES)
+        .max(limit);
+    u32::try_from(cap).unwrap_or(u32::MAX)
 }
 
 /// What a "this PC" query found: the names that match as typed and, when looked for, the similar
@@ -1029,6 +1289,11 @@ pub(crate) fn default_cache_path() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Arke").join("index.bin"))
 }
 
+/// Whether `path` sits on a standard Windows drive letter (`C:\...` or `\\?\C:\...`).
+pub(crate) fn is_local_drive_path(path: &Path) -> bool {
+    drive_of(path).is_some()
+}
+
 /// Whether a path is on the network (`\\server\share\…` or a mapped drive). Uses the path and the
 /// drive type Windows records, no network access.
 pub(crate) fn is_network_path(path: &std::path::Path) -> bool {
@@ -1212,5 +1477,14 @@ mod tests {
             matches!(DriveTarget::parse(&device), DriveTarget::Volume(v) if v.starts_with(r"\device\")),
             "{device}"
         );
+    }
+
+    #[test]
+    fn everything_candidate_cap_handles_small_large_and_extreme_limits() {
+        assert_eq!(everything_candidate_cap(0), 0);
+        assert_eq!(everything_candidate_cap(1_000), 3_000);
+        assert_eq!(everything_candidate_cap(5_000), 5_000);
+        assert_eq!(everything_candidate_cap(10_000), 10_000);
+        assert_eq!(everything_candidate_cap(usize::MAX), u32::MAX);
     }
 }

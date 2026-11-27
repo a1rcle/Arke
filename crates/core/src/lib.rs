@@ -97,6 +97,7 @@ pub mod compare;
 pub mod content;
 pub mod dirsize;
 pub mod entry;
+pub mod everything_query;
 pub mod exif;
 pub mod failure;
 #[cfg(any(test, feature = "test-support"))]

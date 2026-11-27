@@ -821,6 +821,7 @@ pub(crate) struct Explorer {
     global_serial: u64,
     global_task: Option<Task<()>>,
     global_count: Option<usize>,
+    global_everything_state: crate::win_everything::EverythingState,
     global_watch: Option<Subscription>,
     /// The scope strip collapses once typing starts so it doesn't cover the list. Tab or the scope
     /// chip reopens it.
@@ -1188,6 +1189,7 @@ impl Explorer {
             global_serial: 0,
             global_task: None,
             global_count: None,
+            global_everything_state: crate::win_everything::EverythingState::Idle,
             global_watch: None,
             scope_strip_open: false,
             search_scroll: UniformListScrollHandle::new(),
@@ -2782,6 +2784,7 @@ impl Explorer {
         }
         if self.nothing_to_search() {
             // No query means no walk; keep an existing walk so typing again doesn't restart it.
+            self.global_task = None;
             self.search_results = None;
             self.search_cursor = None;
             if self.search_root.is_some() {
@@ -2800,6 +2803,31 @@ impl Explorer {
         let key = (root.clone(), self.show_hidden);
         // Names as typed first; similar ones once asked for (#396, `explorer_similar.rs`).
         let query = self.search_query();
+
+        // Subfolder search on local drives (without `content:`) routes through Everything when
+        // ready; otherwise it falls back seamlessly to Arke's filesystem walker.
+        if let Some(global) = crate::global_search::GlobalSearch::global(cx) {
+            let uses_ev = global.read(cx).uses_everything();
+            if uses_ev
+                && query.content_needle().is_none()
+                && crate::global_search::is_local_drive_path(&root)
+                && !crate::global_search::is_network_path(&root)
+            {
+                self.watch_global(cx);
+                global.update(cx, crate::global_search::GlobalSearch::ensure_everything_if_idle);
+                if global.read(cx).can_search_subfolders(&root, &query) {
+                    self.search.stop();
+                    self.search_root = None;
+                    self.run_subfolders_everything(root, cx);
+                    self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    self.search_cursor = None;
+                    self.similar_focus = false;
+                    return;
+                }
+            }
+        }
+
+        self.global_task = None;
         if self.search_root.as_ref() == Some(&key) {
             self.search.set_parsed(query);
         } else {
