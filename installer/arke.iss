@@ -1,4 +1,4 @@
-﻿; Arke's installer (Inno Setup 6.7.4 or later; 6.6 brought dark mode).
+; Arke's installer (Inno Setup 6.7.4 or later; 6.6 brought dark mode).
 ;
 ;   iscc /DAppVersion=0.4.0 /DArch=x64 /DSourceExe=..\dist\arke-0.4.0.exe /O..\dist installer\arke.iss
 ;
@@ -122,6 +122,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "arke.exe"; Flags: ignoreversion
+Source: "..\third_party\everything\Everything64.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Arke"; Filename: "{app}\arke.exe"
